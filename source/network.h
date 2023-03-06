@@ -21,7 +21,7 @@ protected:
         DISCONNECTING
     };
     
-    NetworkState_t state;
+    NetworkState_t state = DISCONNECTED;
     int sockfd;
     
     struct addrinfo *server_addr = NULL;

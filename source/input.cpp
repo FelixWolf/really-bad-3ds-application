@@ -49,10 +49,8 @@ bool shouldSendControls(InputMap_t *a, InputMap_t *b){
     return false;
 }
 
-void packControls(InputMap_t *inputCurrent, uint8_t *arr[CONTROL_PACK_SIZE])
+void packControls(InputMap_t *inputCurrent, uint8_t *p)
 {
-    uint8_t *p; p = (uint8_t*)arr;
-    p[0] = 8; p++;
     u32ToU8(inputCurrent->held, p); p += 4;
     u32ToU8(inputCurrent->down, p); p += 4;
     u32ToU8(inputCurrent->up, p); p += 4;

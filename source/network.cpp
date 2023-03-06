@@ -104,6 +104,7 @@ bool Network::connect(std::string host, uint16_t port){
 }
     
 void Network::disconnect(){
+    closesocket(sockfd);
     sockfd = 0;
     state = DISCONNECTED;
 }

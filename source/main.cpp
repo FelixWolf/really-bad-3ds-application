@@ -7,21 +7,33 @@
 #include "common.h"
 #include "network.h"
 #include "input.h"
+#include "render.h"
 #include "main.h"
 
 #include <3ds.h>
 
 enum NFBState_t {
     DISCONNECTED,
+    CONNECTING,
     AUTHENTICATING,
     CONNECTED
 };
 
 void sendMessage(Network *net, uint32_t sequence, uint8_t command, uint8_t session[16], uint8_t *data, int datalen){
-    uint8_t result[17 + datalen];
+    uint8_t result[21 + datalen];
+    //Pack command
     result[0] = command;
+    
+    //Pack session ID
     memcpy(result+1, session, 16);
-    memcpy(result+17, data, datalen);
+    
+    //pack sequence
+    uint8_t *p = ((uint8_t*)result) + 17;
+    u32ToU8(sequence, p);
+    
+    //Pack data
+    memcpy(result+21, data, datalen);
+    
     net->send(result, sizeof(result));
 }
 
@@ -39,9 +51,24 @@ enum NetCommand_t {
     COMMAND_FLIP = 10,
     COMMAND_CAMERA = 12,
     COMMAND_PCM = 13,
+    COMMAND_FEATURES = 14,
     COMMAND_GOODBYE = 255
 };
 
+bool connect(Network *net, std::string host, uint16_t port){
+    if(net->connect(host, port))
+    {
+        uint8_t hello[8] = {0,0,0,0,0,0,0,0};
+        uint8_t nullsession[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+        sendMessage(net, 0, COMMAND_HELLO, nullsession, (uint8_t*)hello, 4);
+        return true;
+    }
+    return false;
+}
+
+
+
+uint8_t buffer[4096];
 int main(int argc, char **argv)
 {
     // Initialize services
@@ -55,16 +82,17 @@ int main(int argc, char **argv)
     netInit();
     
     //Initialize console on top screen. Using NULL as the second argument tells the console library to use the internal console structure as current one
-    consoleInit(GFX_TOP, NULL);
+    consoleDebugInit(debugDevice_SVC);
     
     Network net;
+    Renderer renderer;
     
     InputMap_t inputPrevious;
     InputMap_t inputCurrent;
     
-    NFBState_t state;
+    NFBState_t state = DISCONNECTED;
     uint32_t send_sequence = 0;
-    uint8_t SessionID[16];
+    uint8_t SessionID[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
     // Main loop
     while (aptMainLoop())
     {
@@ -72,24 +100,30 @@ int main(int argc, char **argv)
         
         if(net.connected()){
             if(state == CONNECTED && shouldSendControls(&inputCurrent, &inputPrevious)){
-                uint8_t *arr[CONTROL_PACK_SIZE];
-                packControls(&inputCurrent, arr);
-                //Send back the ping as COMMAND_PONG with the received data
-                sendMessage(&net, send_sequence++, COMMAND_INPUT, SessionID, (uint8_t*)arr, sizeof(arr));
+                uint8_t controls[CONTROL_PACK_SIZE];
+                packControls(&inputCurrent, controls);
+                
+                sendMessage(&net, send_sequence++, COMMAND_INPUT, SessionID, (uint8_t*)controls, CONTROL_PACK_SIZE);
                 inputPrevious = inputCurrent;
             }
             
             //This escapes when nothing left to read, or max processing time reached(TODO)
             while(true){
-                uint8_t buffer[0xFFFF];
                 int received = net.recv(buffer, sizeof(buffer));
-                if(received <= 0)
+                if(received < 0)
                     break; //No data? No more messages
                 
-                if(memcmp(buffer+4, SessionID, 16) != 0)
-                    continue; //Not for us
+                if(received < 21)
+                    continue; //Not enough data
                 
-                uint32_t receive_sequence;
+                printf("received %i bytes\n", received);
+                
+                if(memcmp(buffer+1, SessionID, 16) != 0){
+                    printf("Session ID mismatch\n");
+                    continue; //Not for us
+                }
+                
+                //uint32_t receive_sequence = U8ToU32(buffer+17);
                 
                 //Skip command(1), session ID(16), and sequence(4)
                 uint8_t *data = buffer + 21;
@@ -112,19 +146,45 @@ int main(int argc, char **argv)
                     
                     case COMMAND_HELLO:
                     {
+                        if(state != CONNECTING)
+                        {
+                            printf("Received unexpected hello!\n");
+                            break;
+                        }
                         state = AUTHENTICATING;
+                        if(received < 11){
+                            printf("Invalid length for COMMAND_HELLO header\n");
+                            break;
+                        }
+                        
+                        int offset = 0;
+                        
                         //Server sends info on what it is capable of, version, etc
                         //uint32_t server version
                         //uint32_t protocol version
                         //uint32_t flags {
                         // 1 = need authentication
                         //}
+                        uint32_t sVersion = U8ToU32(data + offset); offset += 4;
+                        uint32_t pVersion = U8ToU32(data + offset); offset += 4;
+                        uint32_t flags = U8ToU32(data + offset); offset += 4;
                         
-                        //if authentication, send COMMAND_AUTH with:
-                        //uint8_t length
-                        //uint8_t username[length]
-                        //uint8_t length
-                        //uint8_t password[length]
+                        printf("Got HELLO from server running version %li with protocol version %li\n", sVersion, pVersion);
+                        
+                        bool needAuthentication = (flags & 1) == 1;
+                        if(needAuthentication)
+                        {
+                            printf("I need to authenticate\n");
+                            //if authentication, send COMMAND_AUTH with:
+                            //uint8_t length
+                            //uint8_t username[length]
+                            //uint8_t length
+                            //uint8_t password[length]
+                        }
+                        else
+                        {
+                            state = CONNECTED;
+                        }
                         break;
                     }
                     
@@ -136,29 +196,37 @@ int main(int argc, char **argv)
                         //uint8_t message[length]
                         
                         if(received < 2){
-                            printf("Invalid length for COMMAND_AUTH header");
+                            printf("Invalid length for COMMAND_AUTH header\n");
                             break;
                         }
                         
                         uint8_t status = data[0];
                         uint8_t length = data[1];
                         if(received < length + 2){
-                            printf("Invalid length for COMMAND_AUTH message");
+                            printf("Invalid length for COMMAND_AUTH message\n");
                             break;
                         }
                         
                         std::string message(data+2, data+2+length);
+                        
+                        printf("Server replied to my authentication with: (%i) %s\n", status, message.c_str());
+                        
+                        if(status == 0)
+                        {
+                            state = CONNECTED;
+                        }
+                        
                         break;
                     }
                     
                     case COMMAND_SET_SESSIONID:
                     {
-                        //This will be sent from a NULL session ID!
+                        uint8_t oldSession[16];
+                        memcpy(oldSession, SessionID, 16);
                         if(received == 16)
                             memcpy(SessionID, data, 16);
                         
-                        sendMessage(&net, send_sequence++, COMMAND_SET_SESSIONID, SessionID, data, received);
-                        
+                        sendMessage(&net, send_sequence++, COMMAND_SET_SESSIONID, SessionID, oldSession, 16);
                         break;
                     }
                     
@@ -169,14 +237,14 @@ int main(int argc, char **argv)
                         //uint8_t message[length]
                         
                         if(received < 2){
-                            printf("Invalid length for COMMAND_MESSAGE header");
+                            printf("Invalid length for COMMAND_MESSAGE header\n");
                             break;
                         }
                         
                         uint8_t type = data[0];
                         uint8_t length = data[1];
                         if(received < length + 2){
-                            printf("Invalid length for COMMAND_MESSAGE message");
+                            printf("Invalid length for COMMAND_MESSAGE message\n");
                             break;
                         }
                         
@@ -189,18 +257,17 @@ int main(int argc, char **argv)
                     {
                         //Flip a frame buffer
                         //uint8_t screen {
-                        //  1 = top left
-                        //  2 = top right
-                        //  4 = bottom
+                        //  1 = top
+                        //  2 = bottom
                         //}
                         if(received < 1){
-                            printf("Invalid length for COMMAND_FLIP");
+                            printf("Invalid length for COMMAND_FLIP\n");
                             break;
                         }
                         
-                        bool flip_left = data[0] & 1 == 1;
-                        bool flip_right = data[0] & 2 == 2;
-                        bool flip_bottom = data[0] & 4 == 4;
+                        bool flip_top = (data[0] & 1) == 1;
+                        bool flip_bottom = (data[0] & 2) == 2;
+                        renderer.Flip(flip_top, flip_bottom);
                         
                         break;
                     }
@@ -212,7 +279,7 @@ int main(int argc, char **argv)
                         //uint8_t count;
                         
                         if(received < 2){
-                            printf("Invalid length for COMMAND_FRAMEBUFFER header");
+                            printf("Invalid length for COMMAND_FRAMEBUFFER header\n");
                             break;
                         }
                         
@@ -233,7 +300,7 @@ int main(int argc, char **argv)
                             //uint8_t data[length * 3];
                             if(offset + 4 > received)
                             {
-                                printf("Invalid length for COMMAND_FRAMEBUFFER buffer flags");
+                                printf("Invalid length for COMMAND_FRAMEBUFFER buffer flags\n");
                                 break;
                             }
                             
@@ -248,12 +315,34 @@ int main(int argc, char **argv)
                             int readsize = length * 3;
                             if(offset + readsize > received)
                             {
-                                printf("Invalid length for COMMAND_FRAMEBUFFER buffer data");
+                                printf("Invalid length for COMMAND_FRAMEBUFFER buffer data\n");
                                 break;
                             }
                             
-                            uint8_t image[readsize];
-                            memcpy(image, data+offset, readsize);
+                            if(screen == 0 || screen == 2)
+                            {
+                                int address = ((y * renderer.mTopWidth) + x) * 3;
+                                if(address + readsize < (renderer.mTopWidth * renderer.mTopHeight * 3))
+                                {
+                                    memcpy(renderer.mScreenTopLeft + address, data+offset, readsize);
+                                }
+                            }
+                            if(screen == 1 || screen == 2)
+                            {
+                                int address = ((y * renderer.mTopWidth) + x) * 3;
+                                if(address + readsize < (renderer.mTopWidth * renderer.mTopHeight * 3))
+                                {
+                                    memcpy(renderer.mScreenTopRight + address, data+offset, readsize);
+                                }
+                            }
+                            if(screen == 3)
+                            {
+                                int address = ((y * renderer.mBottomWidth) + x) * 3;
+                                if(address + readsize < (renderer.mBottomWidth * renderer.mBottomHeight * 3))
+                                {
+                                    memcpy(renderer.mScreenBottom + address, data+offset, readsize);
+                                }
+                            }
                             
                             offset += readsize;
                         }
@@ -270,7 +359,7 @@ int main(int argc, char **argv)
                         //uint16_t length
                         
                         if(received < 3){
-                            printf("Invalid length for COMMAND_PCM header");
+                            printf("Invalid length for COMMAND_PCM header\n");
                             break;
                         }
                         
@@ -291,7 +380,7 @@ int main(int argc, char **argv)
                             {
                                 if(offset + 2 > received)
                                 {
-                                    printf("Invalid length for COMMAND_PCM data");
+                                    printf("Invalid length for COMMAND_PCM data\n");
                                     break;
                                 }
                                 uint16_t value = U8ToS16(data + offset); offset += 2;
@@ -301,7 +390,7 @@ int main(int argc, char **argv)
                             {
                                 if(offset + 4 > received)
                                 {
-                                    printf("Invalid length for COMMAND_PCM data");
+                                    printf("Invalid length for COMMAND_PCM data\n");
                                     break;
                                 }
                                 // Left and right channel interlaced
@@ -333,6 +422,18 @@ int main(int argc, char **argv)
                         //uint8_t bitmask{
                         // 1 = screen wide
                         // 2 = enable audio
+                        // 4 = 3D
+                        //}
+                        break;
+                    }
+                    
+                    case COMMAND_FEATURES:
+                    {
+                        //Set options
+                        //uint8_t bitmask{
+                        // 1 = screen wide
+                        // 2 = enable audio
+                        // 4 = 3D
                         //}
                         break;
                     }
@@ -344,14 +445,14 @@ int main(int argc, char **argv)
                         //uint8_t length
                         //uint8_t textreason[length]
                         if(received < 2){
-                            printf("Invalid length for COMMAND_ERROR header");
+                            printf("Invalid length for COMMAND_ERROR header\n");
                             break;
                         }
                         
                         uint8_t reason = data[0];
                         uint8_t length = data[1];
                         if(received < length + 2){
-                            printf("Invalid length for COMMAND_ERROR message");
+                            printf("Invalid length for COMMAND_ERROR message\n");
                             break;
                         }
                         
@@ -366,30 +467,48 @@ int main(int argc, char **argv)
                         //uint8_t length
                         //uint8_t textreason[length]
                         if(received < 2){
-                            printf("Invalid length for COMMAND_GOODBYE header");
+                            printf("Invalid length for COMMAND_GOODBYE header\n");
                             break;
                         }
                         
                         uint8_t reason = data[0];
                         uint8_t length = data[1];
                         if(received < length + 2){
-                            printf("Invalid length for COMMAND_GOODBYE message");
+                            printf("Invalid length for COMMAND_GOODBYE message\n");
                             break;
                         }
                         
                         std::string message(data+2, data+2+length);
+                        
+                        net.disconnect();
                         break;
                     }
                     
                     default:
-                        printf("Unknown opcode %i", buffer[0]);
+                        printf("Unknown opcode %i\n", buffer[0]);
                         continue;
                 }
             }
         }
+        else if(state != DISCONNECTED)
+        {
+            renderer.Reset();
+            renderer.Flip();
+            send_sequence = 0;
+            memset(SessionID,0,16);
+        }
+        else if(state == DISCONNECTED)
+        {
+            
+            /*
+            if(connect(&net, "192.168.0.192", 8888))
+            {
+                state = CONNECTING;
+            }
+            */
+        }
         
-        gfxFlushBuffers();
-        gfxSwapBuffers();
+        renderer.Render();
         gspWaitForVBlank();
     }
 
