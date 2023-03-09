@@ -58,8 +58,8 @@ enum NetCommand_t {
 bool connect(Network *net, std::string host, uint16_t port){
     if(net->connect(host, port))
     {
-        uint8_t hello[8] = {0,0,0,0,0,0,0,0};
-        uint8_t nullsession[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+        static uint8_t hello[8] = {0,0,0,0,0,0,0,0};
+        static uint8_t nullsession[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
         sendMessage(net, 0, COMMAND_HELLO, nullsession, (uint8_t*)hello, 4);
         return true;
     }
@@ -68,7 +68,6 @@ bool connect(Network *net, std::string host, uint16_t port){
 
 
 
-uint8_t buffer[4096];
 int main(int argc, char **argv)
 {
     // Initialize services
@@ -92,7 +91,7 @@ int main(int argc, char **argv)
     
     NFBState_t state = DISCONNECTED;
     uint32_t send_sequence = 0;
-    uint8_t SessionID[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+    static uint8_t SessionID[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
     // Main loop
     while (aptMainLoop())
     {
@@ -100,15 +99,15 @@ int main(int argc, char **argv)
         
         if(net.connected()){
             if(state == CONNECTED && shouldSendControls(&inputCurrent, &inputPrevious)){
-                uint8_t controls[CONTROL_PACK_SIZE];
-                packControls(&inputCurrent, controls);
-                
+                static uint8_t controls[CONTROL_PACK_SIZE];
+                packControls(&inputCurrent, (uint8_t*)controls);
                 sendMessage(&net, send_sequence++, COMMAND_INPUT, SessionID, (uint8_t*)controls, CONTROL_PACK_SIZE);
                 inputPrevious = inputCurrent;
             }
             
             //This escapes when nothing left to read, or max processing time reached(TODO)
             while(true){
+                static uint8_t buffer[4096];
                 int received = net.recv(buffer, sizeof(buffer));
                 if(received < 0)
                     break; //No data? No more messages
@@ -307,8 +306,8 @@ int main(int argc, char **argv)
                             int packedFlags = U8ToU32(data + offset); offset += 4;
                             
                             int length = packedFlags & 511;
-                            int y = (packedFlags >> 9) & 255;
-                            int x = (packedFlags >> 17) & 511;
+                            int x = (packedFlags >> 9) & 255;
+                            int y = (packedFlags >> 17) & 511;
                             int screen = (packedFlags >> 26) & 3;
                             int bufferFlags = (packedFlags >> 28) & 15;
                             
@@ -322,7 +321,7 @@ int main(int argc, char **argv)
                             if(screen == 0 || screen == 2)
                             {
                                 int address = ((y * renderer.mTopWidth) + x) * 3;
-                                if(address + readsize < (renderer.mTopWidth * renderer.mTopHeight * 3))
+                                if(address + readsize <= ((int)renderer.mTopWidth * (int)renderer.mTopHeight * 3))
                                 {
                                     memcpy(renderer.mScreenTopLeft + address, data+offset, readsize);
                                 }
@@ -330,7 +329,7 @@ int main(int argc, char **argv)
                             if(screen == 1 || screen == 2)
                             {
                                 int address = ((y * renderer.mTopWidth) + x) * 3;
-                                if(address + readsize < (renderer.mTopWidth * renderer.mTopHeight * 3))
+                                if(address + readsize <= ((int)renderer.mTopWidth * (int)renderer.mTopHeight * 3))
                                 {
                                     memcpy(renderer.mScreenTopRight + address, data+offset, readsize);
                                 }
@@ -338,7 +337,7 @@ int main(int argc, char **argv)
                             if(screen == 3)
                             {
                                 int address = ((y * renderer.mBottomWidth) + x) * 3;
-                                if(address + readsize < (renderer.mBottomWidth * renderer.mBottomHeight * 3))
+                                if(address + readsize <= ((int)renderer.mBottomWidth * (int)renderer.mBottomHeight * 3))
                                 {
                                     memcpy(renderer.mScreenBottom + address, data+offset, readsize);
                                 }
@@ -429,12 +428,7 @@ int main(int argc, char **argv)
                     
                     case COMMAND_FEATURES:
                     {
-                        //Set options
-                        //uint8_t bitmask{
-                        // 1 = screen wide
-                        // 2 = enable audio
-                        // 4 = 3D
-                        //}
+                        //Requests features
                         break;
                     }
                     
@@ -499,13 +493,10 @@ int main(int argc, char **argv)
         }
         else if(state == DISCONNECTED)
         {
-            
-            /*
             if(connect(&net, "192.168.0.192", 8888))
             {
                 state = CONNECTING;
             }
-            */
         }
         
         renderer.Render();
